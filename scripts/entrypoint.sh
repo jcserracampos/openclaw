@@ -71,6 +71,54 @@ echo "[entrypoint] running openclaw doctor --fix..."
 cd /opt/openclaw/app
 openclaw doctor --fix 2>&1 || true
 
+# ── WhatsApp QR Capture ─────────────────────────────────────────────────────
+# If WhatsApp is configured but no credentials exist, we need to run the login
+# process to capture the QR code and send it via webhook to the dashboard.
+WHATSAPP_CREDS_DIR="$STATE_DIR/credentials/whatsapp/default"
+WHATSAPP_CONFIGURED=0
+
+# Check if WhatsApp is configured via env vars
+if [ -n "${WHATSAPP_ALLOW_FROM:-}" ] || [ -n "${WHATSAPP_DM_POLICY:-}" ]; then
+  WHATSAPP_CONFIGURED=1
+fi
+
+# Also check the generated config for whatsapp channel
+if [ "$WHATSAPP_CONFIGURED" -eq 0 ]; then
+  WHATSAPP_CONFIGURED=$(node -e "
+    try {
+      const c = JSON.parse(require('fs').readFileSync('$STATE_DIR/openclaw.json','utf8'));
+      if (c.channels && c.channels.whatsapp) process.stdout.write('1');
+      else process.stdout.write('0');
+    } catch { process.stdout.write('0'); }
+  " 2>/dev/null || echo "0")
+fi
+
+if [ "$WHATSAPP_CONFIGURED" -eq 1 ]; then
+  echo "[entrypoint] WhatsApp channel is configured"
+
+  # Check if credentials already exist
+  if [ -d "$WHATSAPP_CREDS_DIR" ] && [ "$(ls -A "$WHATSAPP_CREDS_DIR" 2>/dev/null)" ]; then
+    echo "[entrypoint] WhatsApp credentials found, skipping QR capture"
+  else
+    echo "[entrypoint] No WhatsApp credentials found, will run QR capture after gateway starts"
+
+    # Check if we have the required env vars for webhook
+    if [ -n "${WEBHOOK_URL:-}" ] && [ -n "${INSTANCE_ID:-}" ]; then
+      # Enable WhatsApp plugin first
+      echo "[entrypoint] Enabling WhatsApp plugin..."
+      openclaw plugins enable whatsapp 2>&1 || echo "[entrypoint] WhatsApp plugin enable failed or already enabled"
+
+      # Mark that we need to run QR capture after gateway starts
+      export RUN_QR_CAPTURE=1
+    else
+      echo "[entrypoint] WEBHOOK_URL or INSTANCE_ID not set, skipping QR capture"
+      echo "[entrypoint] Set these env vars to enable automatic QR code delivery"
+    fi
+  fi
+else
+  echo "[entrypoint] WhatsApp channel not configured, skipping QR capture"
+fi
+
 # ── Read hooks path from generated config (if hooks enabled) ─────────────────
 HOOKS_PATH=""
 HOOKS_PATH=$(node -e "
@@ -228,4 +276,34 @@ GATEWAY_ARGS+=(--token "$GATEWAY_TOKEN")
 
 # cwd must be the app root so the gateway finds dist/control-ui/ assets
 cd /opt/openclaw/app
-exec openclaw "${GATEWAY_ARGS[@]}"
+
+# If QR capture is needed, start gateway in background and run capture
+if [ "${RUN_QR_CAPTURE:-0}" -eq 1 ]; then
+  echo "[entrypoint] Starting gateway in background for QR capture..."
+
+  # Start gateway in background
+  openclaw "${GATEWAY_ARGS[@]}" &
+  GATEWAY_PID=$!
+
+  # Wait for gateway to be ready (check health endpoint)
+  echo "[entrypoint] Waiting for gateway to be ready..."
+  for i in $(seq 1 30); do
+    if curl -s "http://127.0.0.1:$GATEWAY_PORT/" > /dev/null 2>&1; then
+      echo "[entrypoint] Gateway is ready!"
+      break
+    fi
+    echo "[entrypoint] Waiting for gateway... ($i/30)"
+    sleep 2
+  done
+
+  # Run QR capture script
+  echo "[entrypoint] Running QR capture script..."
+  node /app/scripts/qr-capture.mjs || echo "[entrypoint] QR capture finished (may have failed)"
+
+  # Wait for gateway process (keep container running)
+  echo "[entrypoint] QR capture complete, waiting for gateway..."
+  wait $GATEWAY_PID
+else
+  # Normal startup - exec replaces shell with gateway
+  exec openclaw "${GATEWAY_ARGS[@]}"
+fi
