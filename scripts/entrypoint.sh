@@ -298,11 +298,30 @@ if [ "${RUN_QR_CAPTURE:-0}" -eq 1 ]; then
 
   # Run QR capture script
   echo "[entrypoint] Running QR capture script..."
-  node /app/scripts/qr-capture.mjs || echo "[entrypoint] QR capture finished (may have failed)"
+  node /app/scripts/qr-capture.mjs
+  QR_EXIT_CODE=$?
 
-  # Wait for gateway process (keep container running)
-  echo "[entrypoint] QR capture complete, waiting for gateway..."
-  wait $GATEWAY_PID
+  # Check if WhatsApp credentials were saved (login successful)
+  if [ -d "$WHATSAPP_CREDS_DIR" ] && [ "$(ls -A "$WHATSAPP_CREDS_DIR" 2>/dev/null)" ]; then
+    echo "[entrypoint] WhatsApp login successful! Credentials found."
+    echo "[entrypoint] Restarting gateway to load WhatsApp session..."
+
+    # Kill the current gateway
+    kill $GATEWAY_PID 2>/dev/null || true
+    sleep 2
+
+    # Clean up stale lock files
+    rm -f /tmp/openclaw-gateway.lock 2>/dev/null || true
+    rm -f "$STATE_DIR/gateway.lock" 2>/dev/null || true
+
+    # Start gateway again (this time it will load WhatsApp credentials)
+    echo "[entrypoint] Starting gateway with WhatsApp session..."
+    exec openclaw "${GATEWAY_ARGS[@]}"
+  else
+    echo "[entrypoint] QR capture finished (exit code: $QR_EXIT_CODE)"
+    echo "[entrypoint] No credentials found, waiting for gateway..."
+    wait $GATEWAY_PID
+  fi
 else
   # Normal startup - exec replaces shell with gateway
   exec openclaw "${GATEWAY_ARGS[@]}"
