@@ -108,6 +108,12 @@ if (!config.agents.defaults.workspace) {
 }
 ensure(config, "agents", "defaults", "model");
 
+// Clear model allowlist to allow any model (including openrouter/openrouter/free)
+if (config.agents.defaults.models) {
+  console.log("[configure] clearing model allowlist (agents.defaults.models)");
+  delete config.agents.defaults.models;
+}
+
 // ── Providers ───────────────────────────────────────────────────────────────
 //
 // Built-in providers: openclaw already knows their baseUrl, models, and API
